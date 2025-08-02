@@ -8,6 +8,7 @@ from rich.console import Console
 from rich import print as rprint
 import streamlit as st
 from .progress_state import update_progress
+from .airport_distance import calculate_airport_distance, calculate_consumption_amount_for_air_travel
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -111,6 +112,25 @@ def get_next_incremental_id(df: pd.DataFrame, column_name: str):
         return max_id + 1 if pd.notna(max_id) else 1
     return None
 
+def create_empty_fact_table_structure(dest_df: pd.DataFrame) -> pd.DataFrame:
+    """Create an empty dataframe with the same structure as the destination fact table"""
+    # Create empty dataframe with same columns and dtypes
+    empty_df = pd.DataFrame(columns=dest_df.columns)
+    
+    # Preserve the column data types
+    for column in dest_df.columns:
+        try:
+            empty_df[column] = empty_df[column].astype(dest_df[column].dtype)
+        except:
+            # If dtype conversion fails, keep as object
+            pass
+    
+    # Explicitly ensure it's empty
+    empty_df = empty_df.iloc[0:0].copy()
+    
+    logging.info(f"Created empty fact table structure with {len(empty_df)} rows and columns: {list(empty_df.columns)}")
+    return empty_df
+
 def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame,
                   activity_cat_df: pd.DataFrame, activity_subcat_df: pd.DataFrame,
                   scope_df: pd.DataFrame, activity_emission_source_df: pd.DataFrame,
@@ -122,7 +142,10 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
     # Record start time
     start_time = datetime.now()
 
-    result_df = dest_df.copy()
+    # BUG FIX 1: Create empty dataframe instead of copying destination data with mock data
+    # This ensures we only get user data, not appended to mock data
+    result_df = create_empty_fact_table_structure(dest_df)
+    
     total_records = len(source_df)
     
     # Update progress state
@@ -154,37 +177,178 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
         country_df, country, calc_method
     )
 
+    # BUG FIX 2: Detect columns for airport distance calculation
+    origin_column = None
+    destination_column = None
+    
+    # Debug: Log source data info
+    logging.info(f"Source DataFrame shape: {source_df.shape}")
+    logging.info(f"Source columns: {list(source_df.columns)}")
+    if len(source_df) > 0:
+        logging.info(f"Sample source data (first row): {dict(source_df.iloc[0])}")
+    
+    # Look for origin and destination columns in the source data
+    for column in source_df.columns:
+        column_lower = column.lower().strip()
+        # More flexible detection patterns
+        origin_patterns = ['origin', 'departure', 'from', 'start', 'source', 'depart']
+        destination_patterns = ['destination', 'arrival', 'to', 'end', 'dest', 'arrive', 'target']
+        
+        # Check if column name contains any origin patterns
+        if any(pattern in column_lower for pattern in origin_patterns):
+            origin_column = column
+        # Check if column name contains any destination patterns  
+        elif any(pattern in column_lower for pattern in destination_patterns):
+            destination_column = column
+    
+    # Check if we have air travel consumption calculation
+    is_air_travel_consumption = (
+        calc_method == 'Consumption-based' and 
+        activity_cat.lower() == 'business travel' and
+        activity_subcat.lower() == 'air travel' and
+        origin_column and destination_column
+    )
+    
+    # Debug: Log detection results
+    logging.info(f"Air travel consumption detection:")
+    logging.info(f"  calc_method: {calc_method}")
+    logging.info(f"  activity_cat: {activity_cat}")
+    logging.info(f"  activity_subcat: {activity_subcat}")
+    logging.info(f"  origin_column: {origin_column}")
+    logging.info(f"  destination_column: {destination_column}")
+    logging.info(f"  is_air_travel_consumption: {is_air_travel_consumption}")
+    
+    # Check for missing airport columns in air travel scenario
+    if (calc_method == 'Consumption-based' and 
+        activity_cat.lower() == 'business travel' and
+        activity_subcat.lower() == 'air travel'):
+        
+        if not origin_column or not destination_column:
+            missing_cols = []
+            if not origin_column:
+                missing_cols.append("origin/departure airport codes")
+            if not destination_column:
+                missing_cols.append("destination/arrival airport codes")
+            
+            warning_msg = f"⚠️ Missing required columns for air travel distance calculation: {', '.join(missing_cols)}"
+            st.warning(warning_msg)
+            st.info("📋 Your source Excel file needs columns with airport codes. See SOURCE_DATA_FORMAT_GUIDE.md for details.")
+            logging.warning(f"Missing airport columns for air travel: {missing_cols}")
+            logging.warning("Available columns: " + str(list(source_df.columns)))
+    
+    if is_air_travel_consumption:
+        st.info(f"🛫 Air travel consumption calculation enabled using columns: {origin_column} -> {destination_column}")
+    else:
+        # Even if we don't have perfect column detection, check if ConsumptionAmount mapping indicates distance calculation
+        consumption_mapping = mappings.get('ConsumptionAmount', {})
+        consumption_type = consumption_mapping.get('consumption_type', '').lower()
+        if consumption_type == 'distance' and calc_method == 'Consumption-based':
+            st.info(f"🛫 Air travel distance calculation enabled (consumption_type: {consumption_type})")
+            logging.info(f"Air travel distance calculation enabled via mapping consumption_type: {consumption_type}")
+        elif calc_method == 'Consumption-based' and activity_cat.lower() == 'business travel' and activity_subcat.lower() == 'air travel':
+            st.warning("⚠️ Air travel consumption selected but distance calculation not enabled. Check your source data format.")
+            logging.warning("Air travel consumption scenario but distance calculation not enabled")
+
     for index, (_, source_row) in enumerate(source_df.iterrows()):
         new_row = {}
         
-        # Map the fixed fact columns
-        new_row['EmissionActivityID'] = get_next_incremental_id(result_df, 'EmissionActivityID')
-        new_row['CompanyID'] = lookup_value(company_df, 'CompanyName', company, 'CompanyID')
-        new_row['CountryID'] = lookup_value(country_df, 'CountryName', country, 'CountryID')
-        new_row['ActivityCategoryID'] = lookup_value(activity_cat_df, 'ActivityCategory', activity_cat, 'ActivityCategoryID')
-        new_row['ActivitySubcategoryID'] = lookup_value(activity_subcat_df, 'ActivitySubcategoryName', activity_subcat, 'ActivitySubcategoryID')
-        new_row['ScopeID'] = lookup_value(activity_cat_df, 'ActivityCategory', activity_cat, 'ScopeID')
-        new_row['ActivityEmissionSourceID'] = emission_source_id
-        new_row['UnitID'] = unit_id
+        # Map the fixed fact columns with proper data types
+        new_row['EmissionActivityID'] = int(get_next_incremental_id(result_df, 'EmissionActivityID'))
+        
+        # Get IDs and ensure they are integers
+        company_id = lookup_value(company_df, 'CompanyName', company, 'CompanyID')
+        new_row['CompanyID'] = int(company_id) if company_id is not None else None
+        
+        country_id = lookup_value(country_df, 'CountryName', country, 'CountryID')
+        new_row['CountryID'] = int(country_id) if country_id is not None else None
+        
+        activity_cat_id = lookup_value(activity_cat_df, 'ActivityCategory', activity_cat, 'ActivityCategoryID')
+        new_row['ActivityCategoryID'] = int(activity_cat_id) if activity_cat_id is not None else None
+        
+        activity_subcat_id = lookup_value(activity_subcat_df, 'ActivitySubcategoryName', activity_subcat, 'ActivitySubcategoryID')
+        new_row['ActivitySubcategoryID'] = int(activity_subcat_id) if activity_subcat_id is not None else None
+        
+        scope_id = lookup_value(activity_cat_df, 'ActivityCategory', activity_cat, 'ScopeID')
+        new_row['ScopeID'] = int(scope_id) if scope_id is not None else None
+        
+        new_row['ActivityEmissionSourceID'] = int(emission_source_id) if emission_source_id is not None else None
+        new_row['UnitID'] = int(unit_id) if unit_id is not None else None
         new_row['EmissionFactorID'] = emission_factor_id
 
-        new_row['DateKey'] = get_date_key(date_df, mappings.get('DateKey', {}).get('source_column'), reporting_year, source_row.get(mappings.get('DateKey', {}).get('source_column')))
+        date_key = get_date_key(date_df, mappings.get('DateKey', {}).get('source_column'), reporting_year, source_row.get(mappings.get('DateKey', {}).get('source_column')))
+        new_row['DateKey'] = int(date_key) if date_key is not None else None
 
         # Map direct values from source data
         for field_name, mapping_config in mappings.items():
             source_column = mapping_config.get("source_column")
-            if field_name in ['ConsumptionAmount', 'PaidAmount'] and source_column in source_df.columns:
-                new_row[field_name] = source_row[source_column]
+            
+            # BUG FIX 2: Handle ConsumptionAmount calculation for air travel
+            if field_name == 'ConsumptionAmount':
+                # Check for air travel consumption calculation
+                consumption_type = mapping_config.get("consumption_type", "").lower()
+                should_calculate_distance = (
+                    consumption_type == "distance" and 
+                    calc_method == 'Consumption-based' and 
+                    activity_cat.lower() == 'business travel' and
+                    activity_subcat.lower() == 'air travel'
+                )
+                
+                if should_calculate_distance:
+                    # For air travel, try to calculate distance
+                    distance = None
+                    
+                    # Method 1: If we have detected origin/destination columns, use them
+                    if origin_column and destination_column:
+                        origin_code = source_row.get(origin_column)
+                        dest_code = source_row.get(destination_column)
+                        distance = calculate_airport_distance(origin_code, dest_code)
+                        if distance:
+                            logging.info(f"Calculated air travel distance: {origin_code} -> {dest_code} = {distance} km")
+                    
+                    # Method 2: Try to find airport codes in any available source columns
+                    if not distance:
+                        airport_codes = []
+                        for col in source_df.columns:
+                            value = source_row.get(col)
+                            if value and isinstance(value, str) and len(value.strip()) == 3:
+                                code = value.strip().upper()
+                                # Check if this looks like an airport code (exists in our database)
+                                from .airport_distance import get_airport_coordinates
+                                if get_airport_coordinates(code):
+                                    airport_codes.append(code)
+                        
+                        # If we found exactly 2 airport codes, calculate distance
+                        if len(airport_codes) >= 2:
+                            distance = calculate_airport_distance(airport_codes[0], airport_codes[1])
+                            if distance:
+                                logging.info(f"Calculated air travel distance from detected codes: {airport_codes[0]} -> {airport_codes[1]} = {distance} km")
+                    
+                    new_row[field_name] = float(distance) if distance is not None else None
+                    if distance:
+                        logging.info(f"ConsumptionAmount set to: {distance} km")
+                    else:
+                        logging.warning(f"Could not calculate distance for air travel - no valid airport codes found")
+                elif source_column and source_column in source_df.columns:
+                    value = source_row[source_column]
+                    new_row[field_name] = float(value) if value is not None else None
+                else:
+                    new_row[field_name] = None
+                    
+            elif field_name == 'PaidAmount' and source_column in source_df.columns:
+                value = source_row[source_column]
+                new_row[field_name] = float(value) if value is not None else None
             
             # Handle provider and currency if present in mappings
             if field_name == 'ActivityEmissionSourceProviderID' and source_column in source_df.columns:
                 provider_name = source_row[source_column]
-                new_row[field_name] = lookup_value(activity_emmission_source_provider_df, 
-                                                 'ProviderName', provider_name, 'ActivityEmissionSourceProviderID')
+                provider_id = lookup_value(activity_emmission_source_provider_df, 
+                                         'ProviderName', provider_name, 'ActivityEmissionSourceProviderID')
+                new_row[field_name] = int(provider_id) if provider_id is not None else None
             
             if field_name == 'CurrencyID' and source_column in source_df.columns:
                 currency_code = source_row[source_column]
-                new_row[field_name] = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
+                currency_id = lookup_value(currency_df, 'CurrencyCode', currency_code, 'CurrencyID')
+                new_row[field_name] = int(currency_id) if currency_id is not None else None
         
         # Update progress
         progress = (index + 1) / total_records
@@ -203,8 +367,10 @@ def generate_fact(mappings: dict, source_df: pd.DataFrame, dest_df: pd.DataFrame
     status_text.text("Processing Complete!")
     update_progress(status="Complete")
     
-    # Show summary with timing information
-    st.success(f"Processed {len(result_df) - len(dest_df)} records")
+    # Show summary with timing information  
+    st.success(f"Processed {len(result_df)} new records (no mock data included)")
+    if is_air_travel_consumption:
+        st.info("Air travel distances calculated and included in ConsumptionAmount")
     st.write(f"Total Records in Fact Table: {len(result_df)}")
     st.write(f"Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     st.write(f"Completed at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")

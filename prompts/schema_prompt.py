@@ -118,6 +118,34 @@ def build_prompt(source_columns, dest_schema, source_table_name,calc_method, act
                   similarly understand and map energy , fuel , heating , electricity  
                     """.format(calc_method , activity_cat , activity_sub_cat)
 
+    # Add air travel specific instructions
+    air_travel_note = ""
+    if calc_method == 'Consumption-based' and activity_cat.lower() == 'business travel' and activity_sub_cat.lower() == 'air travel':
+        air_travel_note = """
+                    
+                    SPECIAL CASE FOR AIR TRAVEL CONSUMPTION:
+                    Since this is air travel consumption-based calculation, the system will automatically 
+                    calculate distances between airports using origin and destination airport codes.
+                    
+                    For Air Travel ConsumptionAmount mapping:
+                    - If you find columns containing origin/departure airport codes and destination/arrival airport codes,
+                      map ConsumptionAmount as follows:
+                      
+                      "ConsumptionAmount": {{
+                          "source_column": "null",
+                          "consumption_type": "Distance", 
+                          "transformation": "calculate distance between origin and destination airports using IATA codes",
+                          "relation": "null"
+                      }}
+                    
+                    - The system will automatically detect columns with names like: 
+                      Origin, Departure, From (for origin airport)
+                      Destination, Arrival, To (for destination airport)
+                    
+                    - Airport codes should be IATA codes (e.g., CDG, HND, LHR, JFK)
+                    - Distance will be calculated in kilometers
+                    """
+
     null_mapping_note = """
                         d) if no matching mapping, map fact columns to null and all other values to null
                         """
@@ -171,6 +199,7 @@ def build_prompt(source_columns, dest_schema, source_table_name,calc_method, act
     {pk_note}
     {user_input_note}
     {mapping_note}
+    {air_travel_note}
     {null_mapping_note}
     {output_instruction}
 

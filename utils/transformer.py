@@ -64,7 +64,7 @@ def transform_data(source_df: pd.DataFrame, mapping: pd.DataFrame,
             date_df.to_excel(writer, sheet_name='D_Date', index=False)
             unit_df.to_excel(writer, sheet_name='DE1_Unit', index=False)
             currency_df.to_excel(writer, sheet_name='D_Currency', index=False)
-            activity_emmission_source_provider_df.to_excel(writer, sheet_name='DE1_ActivityEmissionSourceProvi', index=False)
+            activity_emmission_source_provider_df.to_excel(writer, sheet_name='DE1_ActivityEmissionSourceProvider', index=False)
             emmission_activity_data_df.to_excel(writer, sheet_name='FE1_EmissionActivityData', index=False)
 
         return {
